@@ -23,7 +23,8 @@ load_dotenv()
 
 # IMPORTANT:
 # Point LLAMA_MODEL to your QUANTIZED model tag in Ollama, e.g.:
-#   export LLAMA_MODEL="llama3:8b"           # or any q4/q5 variant you pulled
+#   set LLAMA_MODEL=llama3:8b-q4          (Windows)
+#   export LLAMA_MODEL=llama3:8b-q4       (mac/Linux)
 #
 # If not set, it defaults to "llama3".
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
@@ -239,7 +240,11 @@ class SubQuestionNode(BaseModel):
     type: Optional[str] = None  # e.g. "risk", "cost", "constraint", etc.
 
 
-SubQuestionNode.model_rebuild()
+# Pydantic v2 uses model_rebuild, v1 uses update_forward_refs
+try:
+    SubQuestionNode.model_rebuild()
+except AttributeError:
+    SubQuestionNode.update_forward_refs()
 
 
 # -------------------------
@@ -296,7 +301,7 @@ def generate_hierarchical_sub_questions(
     decision_context_text: str,
     case_domain: str,
     max_depth: int = 2,
-    max_top_level: int = 6,
+    max_top_level: int = 4,
 ) -> List[SubQuestionNode]:
     """
     Ask LLaMA to build a hierarchical decomposition of the decision question.
@@ -466,14 +471,34 @@ Rules:
 """
 
     content = call_llama_chat(system_msg, user_msg)
-
     cleaned = content.strip()
+
+    # Strip code fences if model wrapped JSON in ```json ... ```
     if cleaned.startswith("```"):
         cleaned = cleaned.strip("`")
         cleaned = cleaned.replace("json", "", 1).strip()
 
+    # --- Robust JSON parsing with auto-closing of brackets/braces ---
+    def try_parse_with_repair(s: str) -> dict:
+        try:
+            return json.loads(s)
+        except json.JSONDecodeError:
+            repaired = s
+
+            # Balance square brackets
+            diff_brackets = repaired.count("[") - repaired.count("]")
+            if diff_brackets > 0:
+                repaired += "]" * diff_brackets
+
+            # Balance curly braces
+            diff_braces = repaired.count("{") - repaired.count("}")
+            if diff_braces > 0:
+                repaired += "}" * diff_braces
+
+            return json.loads(repaired)
+
     try:
-        obj = json.loads(cleaned)
+        obj = try_parse_with_repair(cleaned)
 
         # Enforce numeric-first, label-derived semantics
         if "confidence_value" not in obj:
@@ -486,8 +511,15 @@ Rules:
         # Override any model-provided qualifier_text
         obj["qualifier_text"] = conf_to_qualifier(conf)
 
+        # Fill in missing optional lists if model omits them
+        if "rebuttals" not in obj or obj["rebuttals"] is None:
+            obj["rebuttals"] = []
+        if "backing" not in obj or obj["backing"] is None:
+            obj["backing"] = []
+
         block = ToulminBlock(**obj)
         return block
+
     except (json.JSONDecodeError, ValidationError, RuntimeError) as e:
         raise RuntimeError(f"Failed to parse Toulmin JSON: {e}\nRaw content:\n{content}")
 
@@ -553,8 +585,10 @@ def aggregate_node_from_children(
             source="model",
             document=None,
             section=None,
-            snippet="Parent conclusions can be derived from well-supported child assessments "
-                    "in a hierarchical reasoning structure.",
+            snippet=(
+                "Parent conclusions can be derived from well-supported child assessments "
+                "in a hierarchical reasoning structure."
+            ),
             ref="hierarchical-reasoning",
         )
     ]
@@ -817,8 +851,14 @@ if __name__ == "__main__":
     try:
         r = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=5)
         r.raise_for_status()
+        tags_json = r.json()
+        models = tags_json.get("models") or tags_json.get("models", [])
         print("Ollama is reachable at", OLLAMA_HOST)
-        print("Available models:", [m.get("name") for m in r.json().get("models", [])])
+        try:
+            available = [m.get("name") for m in models]
+            print("Available models:", available)
+        except Exception:
+            pass
     except Exception as e:
         raise SystemExit(
             f"ERROR: Could not reach Ollama at {OLLAMA_HOST}. "
