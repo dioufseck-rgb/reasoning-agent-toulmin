@@ -2,7 +2,7 @@
 
 This repository implements a transparent reasoning agent based on the Toulmin model of argumentation, powered by hierarchical sub-question decomposition and auditable probabilistic confidence propagation.
 
-It is designed to demonstrate state-of-the-art structured reasoning using LLMs (quantized LLaMA models), with a focus on:
+It is designed to demonstrate state-of-the-art structured reasoning using LLMs (now using LLama models, but would conceptually work with any LLM), with a focus on:
 
 Explainability
 
